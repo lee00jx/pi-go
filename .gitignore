@@ -1,0 +1,26 @@
+# Build artifacts
+*.exe
+*.test
+*.out
+/example/hello/hello
+/example/gin-integration/gin-integration
+
+# Local agent DB (gin-integration default)
+*.db
+*.db-journal
+*.db-wal
+*.db-shm
+pi-agent.db
+
+# Go
+vendor/
+
+# OS / editor
+.DS_Store
+*.swp
+*~
+.idea/
+.vscode/
+.claude/
+.cursor/
+
