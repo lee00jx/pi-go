@@ -6,7 +6,7 @@ context compaction. Designed to drop into a backend (Gin or plain
 the loop.
 
 Module path is `github.com/lee00jx/pi-go`.
-Design: [`DESIGN.md`](DESIGN.md). Project memory: [`.pmemory/INDEX.md`](.pmemory/INDEX.md).
+Design: [`DESIGN.md`](DESIGN.md).
 
 ## What it does
 

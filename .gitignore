@@ -24,3 +24,6 @@ vendor/
 .claude/
 .cursor/
 
+
+# Local project memory
+.pmemory/
