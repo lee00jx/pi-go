@@ -1,232 +1,183 @@
 # pi-go
 
-A reusable Go agent library: ReAct loop, SSE event stream, two-level
-context compaction. Designed to drop into a backend (Gin or plain
-`net/http`) so the integrator owns tools and prompts; the library owns
-the loop.
+[中文](README.zh-CN.md)
 
-Module path is `github.com/lee00jx/pi-go`.
-Design: [`DESIGN.md`](DESIGN.md).
+pi-go is a Go library for embedding an LLM agent in your backend. You supply
+the tools and the system prompt; pi-go runs the conversation loop (model →
+tool calls → model …), streams events to the browser over SSE, and stores the
+session history.
 
-## What it does
+It is a library, not a service: it compiles into your binary and mounts as an
+`http.Handler` on Gin or plain `net/http`.
 
-- ReAct loop with streaming events (`text` / `thinking` / `tool_call`)
-- Custom tools via `core.Tool` (your business APIs, plus built-in
-  `bash` / `read` / `write` / `edit` / `recall_event`)
-- OpenAI-compatible + Anthropic providers, mid-run model switch
-- Dangerous-op confirmation (`BeforeToolCall` → SSE pause →
-  `POST .../confirmations`)
-- Append-only session store (in-memory or official GORM adapter)
-- Disconnect-safe SSE replay, graceful shutdown + resume
-- L1 tool-result eviction + L2 LLM summary, token budget, rate limit,
-  request_id idempotency
-
-## What it does not do
-
-These were in the original DESIGN draft and were **deliberately dropped**:
-
-- **sql tool** — pi has none; do not add one in the library
-- **path sandbox / gitignore on fs** — 1:1 with pi; gate dangerous
-  paths in `BeforeToolCall`
-- **Casbin / JWT inside the library** — the Go backend authenticates
-  and authorizes; stamp `ContextWithUserID` and optionally
-  `WithAuthorizer`. Tool-level Casbin stays in `BeforeToolCall`
-- **Viper loader (`FromViper`)** — fill `Runner` fields yourself
-- TUI, CLI, remote session protocol, TypeScript extensions
-
-## Requirements
-
-Go 1.24+. SQLite persistence uses `mattn/go-sqlite3` (CGO).
-
-## Add it to a backend
+## Install
 
 ```
 go get github.com/lee00jx/pi-go@latest
 ```
 
-To develop against a local checkout, add
-`replace github.com/lee00jx/pi-go => /path/to/pi-go` to your `go.mod`.
+Requires Go 1.24+.
 
-Minimal glue (custom tool + system prompt + gateway):
+## Quick start
+
+Three steps: write a tool, build a `Runner`, mount the gateway.
 
 ```go
-type queryOrderTool struct{}
+// 1. A tool is your business API, described so the model knows when to call it.
+type queryOrder struct{}
 
-func (queryOrderTool) Name() string { return "query_order" }
-func (queryOrderTool) Description() string {
-    return "Look up an order by id. Returns payment status. Call this when the user asks about an order."
+func (queryOrder) Name() string        { return "query_order" }
+func (queryOrder) Description() string { return "Look up an order by id and return its payment status." }
+func (queryOrder) Schema() json.RawMessage {
+    return json.RawMessage(`{"type":"object","properties":{"order_id":{"type":"string"}},"required":["order_id"]}`)
 }
-func (queryOrderTool) Schema() json.RawMessage {
-    return json.RawMessage(`{"type":"object","properties":{"order_id":{"type":"string","description":"order id"}},"required":["order_id"]}`)
-}
-func (queryOrderTool) ExecutionMode() core.Mode { return core.ModeParallel }
-func (queryOrderTool) Execute(_ context.Context, call core.ToolCall, _ func(core.ToolUpdate)) (core.ToolResult, error) {
-    var args struct {
-        OrderID string `json:"order_id"`
-    }
-    if err := json.Unmarshal(call.Arguments, &args); err != nil || args.OrderID == "" {
+func (queryOrder) ExecutionMode() core.Mode { return core.ModeParallel }
+func (queryOrder) Execute(_ context.Context, call core.ToolCall, _ func(core.ToolUpdate)) (core.ToolResult, error) {
+    var args struct{ OrderID string `json:"order_id"` }
+    if json.Unmarshal(call.Arguments, &args) != nil || args.OrderID == "" {
         return core.ToolResult{Output: "missing order_id", IsError: true}, nil
     }
-    // call your own DB / HTTP service
     return core.ToolResult{Output: "order " + args.OrderID + ": paid"}, nil
 }
 
+// 2. A Runner holds the model, tools and prompt.
 store := session.NewMemoryStore()
 oa, _ := provider.NewOpenAI(os.Getenv("PI_BASE_URL"), os.Getenv("PI_API_KEY"))
-stream := provider.WithRetry(oa.Stream, nil)
-model := core.Model{Provider: "openai", ID: "gpt-4o-mini", ContextWindow: 128000}
-
 runner := &core.Runner{
     Store:        store,
-    StreamFn:     stream,
-    Tools:        tools.NewRegistry(queryOrderTool{}).List(),
-    Model:        model,
-    SystemPrompt: "You are an order assistant. Use query_order to look up orders.",
+    StreamFn:     provider.WithRetry(oa.Stream, nil),
+    Model:        core.Model{Provider: "openai", ID: "gpt-4o-mini", ContextWindow: 128000},
+    Tools:        tools.NewRegistry(queryOrder{}).List(),
+    SystemPrompt: "You are an order assistant.",
     MaxTurns:     8,
-    // Sampling is optional. Leave it zero to omit temperature / top_p /
-    // max_tokens / seed and let vLLM (or OpenAI / Anthropic) keep its own
-    // defaults. Fill only the knobs you want to override; temperature 0
-    // is a real value, so use core.Ptr:
-    // Sampling: core.Sampling{Temperature: core.Ptr(0.2), MaxTokens: 2048},
 }
-gw := gateway.New(store, runner)
-// Multiple agent types on one gateway:
-// gw := gateway.New(store, calc,
-//     gateway.WithAgentRunner("calc", calc),
-//     gateway.WithAgentRunner("compare", compare),
-// )
-// Create then requires {"agent":"calc"|"compare"}; unknown types on
-// existing sessions return 503.
 
-// Gin: one catch-all mounts every agent endpoint. The wildcard MUST be named.
-r.Any("/api/agent/*catch", gin.WrapH(gw))
+// 3. Mount the gateway behind your auth. It rejects requests without a user (401).
+gw := gateway.New(store, runner)
+protected := r.Group("/", func(c *gin.Context) {
+    uid := "..." // from your JWT / session
+    c.Request = c.Request.WithContext(gateway.ContextWithUserID(c.Request.Context(), uid))
+})
+protected.Any("/api/agent/*catch", gin.WrapH(gw))
 ```
 
-OpenAI-compatible endpoints accept opt-in provider fields without widening
-the core request contract. For example, a vLLM/Qwen deployment can disable
-thinking:
+Runnable versions: [`example/hello`](example/hello/main.go) (smallest) and
+[`example/gin-integration`](example/gin-integration/main.go) (full setup:
+real providers, SQLite, compaction, graceful shutdown). Without
+`PI_API_KEY` the Gin example uses a fake model, so it runs offline.
+
+## HTTP API
+
+All paths are under the prefix `/api/agent` (configurable, see below). The
+caller must be authenticated as described in step 3.
+
+| Method | Path | Purpose |
+|---|---|---|
+| POST | `/sessions` | Create a session (optional `{"agent":"..."}`) |
+| GET | `/sessions` | List the current user's sessions (`?agent=`, `?limit=`) |
+| POST | `/sessions/{id}/prompts` | Send a message: `{"text":"..."}` |
+| GET | `/sessions/{id}/events` | SSE event stream; reconnect with `Last-Event-ID` |
+| GET | `/sessions/{id}/messages` | Message history |
+| GET | `/sessions/{id}/turns` | History grouped per user message |
+| POST | `/sessions/{id}/stop` | Cancel the current run |
+| POST | `/sessions/{id}/confirmations` | Allow or deny a tool waiting for confirmation |
+| POST | `/sessions/{id}/model` | Switch model from the next turn |
+| POST | `/sessions/{id}/resume` | Continue a run interrupted by a restart |
+| GET | `/sessions/{id}/usage` | Token usage and cost |
+| GET | `/sessions/{id}/context-stats` | How full the context window is |
+
+A typical client creates a session, opens the event stream, then sends
+messages.
+
+## Common configuration
+
+**Route prefix.** `gateway.WithBasePath("/api/v1/agent")`. The gateway matches
+the full path itself, so this must equal the path your router forwards;
+otherwise requests reach the gateway and get 404.
+
+**Several agents on one gateway.** Register each runner by name; clients then
+pass `{"agent":"calc"}` when creating a session.
 
 ```go
-oa, err := provider.NewOpenAI(
-    baseURL,
-    apiKey,
-    provider.WithExtraBody(map[string]any{
-        "chat_template_kwargs": map[string]any{"enable_thinking": false},
-    }),
+gw := gateway.New(store, calcRunner,
+    gateway.WithAgentRunner("calc", calcRunner),
+    gateway.WithAgentRunner("compare", compareRunner),
 )
 ```
 
-`WithExtraBody` rejects library-owned keys such as `model`, `messages`,
-`tools`, and sampling fields. TLS certificates are verified by default.
-For an explicitly trusted development/private endpoint only,
-`WithInsecureSkipTLSVerify()` disables verification on that provider client
-without mutating Go's global transport. In production, prefer
-`WithHTTPClient` configured with the private CA.
-
-Tool failures must return `IsError: true` (never panic, never abort the
-loop). Dangerous tools stay dumb; confirmation is a hook:
+**Confirm dangerous tools.** Keep the tool simple and ask in a hook; the run
+pauses until the client posts to `/confirmations`.
 
 ```go
-Hooks: core.Hooks{
+runner.Hooks = core.Hooks{
     BeforeToolCall: func(_ context.Context, call core.ToolCall) (core.Decision, error) {
         if call.Name == "refund" {
             return core.Decision{Confirm: true, Reason: "refund is irreversible"}, nil
         }
         return core.Decision{}, nil
     },
-},
+}
 ```
 
-Custom model-output protocols are optional. A project implements
-`output.Processor`; pi-go handles event lifecycle and runs project-defined
-validation/sanitizing `output.Stage`s in order:
+**Persist to a database.** Use the GORM adapter with any GORM driver; pi-go
+itself does not pick one. With SQLite, allow a single connection and enable
+WAL, otherwise concurrent writes fail with `database is locked`.
 
 ```go
-rawEvents, _ := runner.Run(ctx, sessionID, prompts)
-events := output.Transform(
-    ctx,
-    rawEvents,
-    output.WithProcessor(func() output.Processor {
-        return NewProjectProcessor()
-    }),
-    output.WithStages(output.StageFunc(ValidateAndSanitize)),
-)
+import gormstore "github.com/lee00jx/pi-go/adapter/gorm"
+
+s := gormstore.New(db)
+if err := s.Migrate(ctx); err != nil { ... }
+gw := gateway.New(s, runner)
 ```
 
-Without `WithProcessor`, `output.Transform` returns the original channel and
-starts no goroutine. The package does not contain a tag, table, chart, or
-JSON-repair implementation. Those rules belong to the integrating project.
-When using the built-in gateway, wrap the same transform with
-`gateway.WithEventMiddleware`; processed events are then persisted and
-replayed like every other `AgentEvent`.
+**Post-process model output.** If your model writes a custom format (tags,
+tables, charts), implement `output.Processor` to split it into chunks and
+`output.Stage`s to validate or fix them. Hook it into the gateway with
+`gateway.WithEventMiddleware`. pi-go ships no format of its own.
 
-Persistence: pass `adapter/gorm.New(db)` after `Migrate`. For SQLite set
-`db.DB().SetMaxOpenConns(1)` plus WAL — two goroutines write the same
-file (core messages + gateway ui_events) and a multi-connection pool
-returns `database is locked`.
+```go
+gateway.WithEventMiddleware(func(ctx context.Context, in <-chan core.AgentEvent) <-chan core.AgentEvent {
+    return output.Transform(ctx, in,
+        output.WithProcessor(NewMyProcessor),
+        output.WithStages(MyValidateStage()),
+    )
+})
+```
 
-Full wiring (providers, compaction, rate limit, SIGTERM resume):
-[`example/gin-integration/main.go`](example/gin-integration/main.go).
-Smallest possible: [`example/hello/main.go`](example/hello/main.go).
+**Other options.** `WithRateLimit` (concurrent runs and prompts per minute
+per user), `WithAuthorizer` (extra access check per session),
+`gw.InjectTurn` (write a welcome or summary turn without calling the model),
+`provider.WithExtraBody` (vendor-specific request fields, e.g. turning off
+Qwen thinking), `core.Runner.Sampling` (temperature etc.; leave empty to use
+the server defaults). See the Go doc comments for details.
 
-## HTTP API
+## Out of scope
 
-Prefix defaults to `/api/agent`. The gateway is fail-closed: mount it
-behind your auth layer and stamp `gateway.ContextWithUserID(ctx, userID)`
-— requests without an identity get 401. `gateway.WithAnonymousUser`
-restores an open dev mode for local use only.
-
-| Method | Path | Purpose |
-|---|---|---|
-| POST | `/sessions` | create session (user from auth context; optional `agent`) |
-| GET | `/sessions` | list current user's sessions (`?agent=` `?limit=`, default 50, max 200) |
-| POST | `/sessions/{id}/prompts` | user prompt (`{"text":"..."}`; optional `request_id`; response includes `prompt_id` / `run_id`) |
-| GET | `/sessions/{id}/events` | SSE stream (`Last-Event-ID` / `?after=seq`) |
-| GET | `/sessions/{id}/messages` | first-screen history |
-| GET | `/sessions/{id}/turns` | per-prompt projection (user + activity + results; results from ui_event only) |
-| POST | `/sessions/{id}/stop` | cancel in-flight run |
-| POST | `/sessions/{id}/confirmations` | allow / deny a dangerous tool |
-| POST | `/sessions/{id}/model` | switch provider/model at next turn |
-| POST | `/sessions/{id}/resume` | continue an `interrupted` session |
-| GET | `/sessions/{id}/usage` | cumulative tokens + cost |
-| GET | `/sessions/{id}/context-stats` | occupancy bar |
-
-Typical client: create session → open SSE → send prompt. Confirmation
-events pause the run until `/confirmations`.
-
-To seed a turn without calling the LLM (welcome / host-written summary),
-use the in-process API `gw.InjectTurn(ctx, sessionID, gateway.InjectTurnInput{...})`
-— it appends user + assistant + an `output` ui_event under one `prompt_id`
-so `GET /turns` has a non-empty results area. There is no HTTP route for this
-yet (same-process hosts call the method directly).
+pi-go deliberately leaves these to your backend: authentication and
+permissions (JWT, Casbin), SQL tools, file-system sandboxing (use
+`BeforeToolCall`), config loading, and any CLI or UI.
 
 ## Layout
 
 ```
-core/       loop, events, Tool, hooks, compaction, salvage
-provider/   OpenAI-compatible, Anthropic, Faux, retry
-session/    Store contract + MemoryStore
-tools/      registry + bash/fs
-output/     optional output Processor + ordered Stage pipeline
-gateway/    stdlib http.Handler (SSE / REST)
-adapter/    official GORM Store (optional)
-example/    hello (net/http) + gin-integration
+core/       conversation loop, events, tool interface, hooks, context compaction
+provider/   OpenAI-compatible and Anthropic clients, retry, fake model for tests
+session/    storage interface + in-memory store
+tools/      tool registry + built-in bash / file tools
+output/     optional output processing pipeline
+gateway/    HTTP handler (REST + SSE)
+adapter/    GORM storage
+example/    runnable examples
 ```
 
-Core packages never import gin / gorm / zap / viper.
+The core packages do not import gin, gorm, zap or viper.
 
-## Develop
+## Development
 
 ```
 go test -race ./...
-cd example/hello && go run .
-cd example/gin-integration && go run .   # no PI_API_KEY → faux provider
 ```
 
-## Known limits (v1)
-
-- Process-local run lock and rate limiter (not multi-instance)
-- SQLite persistence verified; MySQL/Postgres share the GORM adapter
-  but DECIMAL/TIMESTAMP differences are untested
-- No path sandbox on bash/fs (integrator hook)
-- `session` package has no dedicated tests (covered via gateway/gorm)
+Known limits: run locks and rate limits are per process (no multi-instance
+deployment yet); only SQLite has been tested with the GORM adapter.
