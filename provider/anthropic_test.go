@@ -511,3 +511,28 @@ func TestAnthropicSamplingSet(t *testing.T) {
 		t.Fatalf("Anthropic wire must not carry seed: %s", body)
 	}
 }
+
+// TestAnthropicDowngradesOpenAIReasoningSignature: Block.Signature is an
+// opaque provider payload. OpenAI Responses stores a JSON reasoning item
+// there; Anthropic must not send it as an Anthropic thinking signature.
+func TestAnthropicDowngradesOpenAIReasoningSignature(t *testing.T) {
+	req := core.Request{Messages: []*core.Message{{
+		Role: core.RoleAssistant,
+		Content: []core.Block{
+			{Type: core.BlockThinking, Thinking: "openai reasoning", Signature: `{"type":"reasoning","id":"rs_1","encrypted_content":"enc"}`},
+			core.TextBlock("answer"),
+		},
+	}}}
+	msgs := buildAnMessages(req)
+	if len(msgs) != 1 {
+		t.Fatalf("messages = %d, want 1", len(msgs))
+	}
+	var blocks []map[string]any
+	if err := json.Unmarshal(msgs[0].Content, &blocks); err != nil {
+		t.Fatalf("content = %s", msgs[0].Content)
+	}
+	if len(blocks) != 2 || blocks[0]["type"] != "text" || blocks[0]["text"] != "openai reasoning" ||
+		blocks[1]["type"] != "text" || blocks[1]["text"] != "answer" {
+		t.Fatalf("blocks = %v, want two text blocks (reasoning downgraded)", blocks)
+	}
+}

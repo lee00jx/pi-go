@@ -114,6 +114,13 @@ type Runner struct {
 	// omit temperature / top_p / max_tokens / seed — the integrator who
 	// is happy with vLLM/OpenAI defaults fills nothing.
 	Sampling Sampling
+	// ThinkingLevel is the default reasoning effort for every turn: one of
+	// ThinkingOff / ThinkingMinimal / ThinkingLow / ThinkingMedium /
+	// ThinkingHigh / ThinkingXHigh / ThinkingMax, or "" to leave it to the
+	// provider. It applies to the first turn too; PrepareNextTurn may
+	// override it at a later turn boundary (ThinkingOff explicitly
+	// disables reasoning).
+	ThinkingLevel string
 	// Compaction configures two-level context compaction (DESIGN §6.4). The
 	// zero value disables it (pure replay); use DefaultCompaction() for the
 	// DESIGN defaults.
@@ -387,7 +394,7 @@ func (r *Runner) run(ctx context.Context, sessionID string, prompts []*Message, 
 		model = m
 	}
 	system := r.SystemPrompt
-	thinkingLevel := ""
+	thinkingLevel := r.ThinkingLevel
 	turn := 0
 	var lastSnap TurnSnapshot
 	pending := r.steering(ctx, sessionID)

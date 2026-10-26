@@ -544,12 +544,16 @@ func buildAnMessages(req core.Request) []anMessage {
 					}
 					raw = append(raw, mustJSON(anText{Type: "text", Text: b.Text}))
 				case core.BlockThinking:
-					if b.Signature != "" {
+					// Signature is opaque and provider-specific: Anthropic
+					// signatures are base64, while OpenAI Responses stores
+					// a JSON reasoning item. A JSON-looking signature must
+					// not be sent to Anthropic as its own signature.
+					if b.Signature != "" && !isJSONObject(b.Signature) {
 						raw = append(raw, mustJSON(anThinkingBlock{
 							Type: "thinking", Thinking: b.Thinking, Signature: b.Signature,
 						}))
 					} else if strings.TrimSpace(b.Thinking) != "" {
-						// No signature: the API would reject a thinking
+						// No usable signature: the API would reject a thinking
 						// block it cannot verify, so downgrade to text.
 						raw = append(raw, mustJSON(anText{Type: "text", Text: b.Thinking}))
 					}

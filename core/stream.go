@@ -35,6 +35,20 @@ type Sampling struct {
 	Seed        *int64
 }
 
+// Provider-neutral thinking levels. An empty level means "leave it to the
+// provider" (omit the reasoning parameter); ThinkingOff explicitly disables
+// reasoning. Providers map these to their own wire values and may ignore
+// levels they do not support.
+const (
+	ThinkingOff     = "off"
+	ThinkingMinimal = "minimal"
+	ThinkingLow     = "low"
+	ThinkingMedium  = "medium"
+	ThinkingHigh    = "high"
+	ThinkingXHigh   = "xhigh"
+	ThinkingMax     = "max"
+)
+
 // Normalized stream event kinds (DESIGN §3.3):
 //
 //	start → (text_delta | thinking_delta | toolcall_delta)* → done | error

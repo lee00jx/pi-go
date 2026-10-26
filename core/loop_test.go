@@ -249,3 +249,38 @@ func TestPromptIDCopiedOntoAssistantAndTool(t *testing.T) {
 		t.Fatalf("assistant=%v tool=%v, want both stamped", sawAssistant, sawTool)
 	}
 }
+
+// TestRunnerThinkingLevelAppliesToFirstTurn pins the fix for the old gap:
+// the loop used to start with thinkingLevel="" and only PrepareNextTurn
+// (which does not run before turn 1) could change it.
+func TestRunnerThinkingLevelAppliesToFirstTurn(t *testing.T) {
+	ctx := context.Background()
+	store := session.NewMemoryStore()
+	if err := store.CreateSession(ctx, session.SessionMeta{
+		ID: "s1", UserID: "u1", Provider: "faux", Model: "faux-mini",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	faux := provider.NewFaux(
+		core.Model{Provider: "faux", ID: "faux-mini", ContextWindow: 128000},
+		provider.FauxTurn{Text: "done"},
+	)
+	var seen []string
+	stream := func(ctx context.Context, req core.Request) (<-chan core.StreamEvent, error) {
+		seen = append(seen, req.ThinkingLevel)
+		return faux.Stream(ctx, req)
+	}
+	runner := &core.Runner{
+		Store: store, StreamFn: stream, Model: faux.Model,
+		ThinkingLevel: core.ThinkingMedium, MaxTurns: 1,
+	}
+	events, err := runner.Run(ctx, "s1", []*core.Message{core.NewUserMessage("hello")})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for range events {
+	}
+	if len(seen) == 0 || seen[0] != core.ThinkingMedium {
+		t.Fatalf("first turn thinking level = %v, want %q", seen, core.ThinkingMedium)
+	}
+}

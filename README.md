@@ -145,6 +145,30 @@ gateway.WithEventMiddleware(func(ctx context.Context, in <-chan core.AgentEvent)
 })
 ```
 
+**Use OpenAI's Responses API.** `provider.NewOpenAI` speaks
+`/chat/completions`; `provider.NewOpenAIResponses` speaks `/responses`. Both
+clients expose a `core.StreamFn`, so only the constructor changes. The
+Responses client replays reasoning items (including the encrypted reasoning)
+and streams function calls, text and reasoning summaries.
+
+```go
+resp, _ := provider.NewOpenAIResponses(os.Getenv("PI_BASE_URL"), os.Getenv("PI_API_KEY"))
+runner := &core.Runner{
+    Store:         store,
+    StreamFn:      provider.WithRetry(resp.Stream, nil),
+    Model:         core.Model{Provider: "openai", ID: "gpt-5-mini", ContextWindow: 400000},
+    ThinkingLevel: core.ThinkingHigh,
+    // ...tools, prompt, limits
+}
+```
+
+**Set reasoning effort.** `core.Runner.ThinkingLevel` is copied into every
+turn, including the first; `off` explicitly disables reasoning and an empty
+value leaves it to the provider. The OpenAI chat client sends
+`reasoning_effort`, the Responses client sends `reasoning.effort` (plus a
+summary and encrypted reasoning by default). `PrepareNextTurn` can change
+the level at a later turn boundary.
+
 **Other options.** `WithRateLimit` (concurrent runs and prompts per minute
 per user), `WithAuthorizer` (extra access check per session),
 `gw.InjectTurn` (write a welcome or summary turn without calling the model),
@@ -162,7 +186,7 @@ permissions (JWT, Casbin), SQL tools, file-system sandboxing (use
 
 ```
 core/       conversation loop, events, tool interface, hooks, context compaction
-provider/   OpenAI-compatible and Anthropic clients, retry, fake model for tests
+provider/   OpenAI chat + Responses clients, Anthropic client, retry, faux model
 session/    storage interface + in-memory store
 tools/      tool registry + built-in bash / file tools
 output/     optional output processing pipeline
@@ -181,3 +205,8 @@ go test -race ./...
 
 Known limits: run locks and rate limits are per process (no multi-instance
 deployment yet); only SQLite has been tested with the GORM adapter.
+
+Planned **0.3.0** event-contract refactor (align with upstream pi's
+`message_update` / block-level events): see
+[docs/REFACTOR_0.3.0.md](docs/REFACTOR_0.3.0.md). 0.2.x is the frozen
+flat-event compatibility line.

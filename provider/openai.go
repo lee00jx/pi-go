@@ -97,9 +97,15 @@ func WithInsecureSkipTLSVerify() OpenAIOption {
 	}
 }
 
+// openAIReservedBodyFields covers the typed fields owned by both OpenAI
+// clients (chat completions and Responses); WithExtraBody may not override
+// them.
 var openAIReservedBodyFields = map[string]struct{}{
+	// chat completions
 	"model": {}, "stream": {}, "stream_options": {}, "messages": {}, "tools": {},
 	"temperature": {}, "top_p": {}, "max_tokens": {}, "seed": {},
+	// responses
+	"input": {}, "reasoning": {}, "include": {}, "max_output_tokens": {}, "store": {},
 }
 
 // WithExtraBody adds provider-specific top-level JSON fields to every
@@ -143,26 +149,37 @@ func NewOpenAI(baseURL, apiKey string, opts ...OpenAIOption) (*OpenAI, error) {
 	if apiKey == "" {
 		return nil, errors.New("provider: openai apiKey is required")
 	}
+	cfg, err := parseOpenAIOptions(opts)
+	if err != nil {
+		return nil, err
+	}
+	return &OpenAI{
+		BaseURL: baseURL, APIKey: apiKey, Provider: "openai",
+		HTTPClient: cfg.httpClient, extraBody: cfg.extraBody,
+	}, nil
+}
+
+// parseOpenAIOptions applies the shared OpenAI client options (HTTP client,
+// TLS, extra body). Both the chat-completions and Responses constructors use
+// it so their configuration surface stays identical.
+func parseOpenAIOptions(opts []OpenAIOption) (openAIOptions, error) {
 	cfg := openAIOptions{}
 	for _, opt := range opts {
 		if opt == nil {
 			continue
 		}
 		if err := opt(&cfg); err != nil {
-			return nil, err
+			return openAIOptions{}, err
 		}
 	}
 	if cfg.insecureSkipTLSVerify {
 		client, err := cloneHTTPClientWithInsecureTLS(cfg.httpClient)
 		if err != nil {
-			return nil, err
+			return openAIOptions{}, err
 		}
 		cfg.httpClient = client
 	}
-	return &OpenAI{
-		BaseURL: baseURL, APIKey: apiKey, Provider: "openai",
-		HTTPClient: cfg.httpClient, extraBody: cfg.extraBody,
-	}, nil
+	return cfg, nil
 }
 
 func cloneHTTPClientWithInsecureTLS(client *http.Client) (*http.Client, error) {
@@ -221,15 +238,16 @@ type oaToolSchema struct {
 }
 
 type oaRequest struct {
-	Model         string       `json:"model"`
-	Stream        bool         `json:"stream"`
-	StreamOptions *oaStreamOpt `json:"stream_options,omitempty"`
-	Messages      []oaMessage  `json:"messages"`
-	Tools         []oaToolDef  `json:"tools,omitempty"`
-	Temperature   *float64     `json:"temperature,omitempty"`
-	TopP          *float64     `json:"top_p,omitempty"`
-	MaxTokens     int          `json:"max_tokens,omitempty"`
-	Seed          *int64       `json:"seed,omitempty"`
+	Model           string       `json:"model"`
+	Stream          bool         `json:"stream"`
+	StreamOptions   *oaStreamOpt `json:"stream_options,omitempty"`
+	Messages        []oaMessage  `json:"messages"`
+	Tools           []oaToolDef  `json:"tools,omitempty"`
+	Temperature     *float64     `json:"temperature,omitempty"`
+	TopP            *float64     `json:"top_p,omitempty"`
+	MaxTokens       int          `json:"max_tokens,omitempty"`
+	Seed            *int64       `json:"seed,omitempty"`
+	ReasoningEffort string       `json:"reasoning_effort,omitempty"`
 }
 
 type oaStreamOpt struct {
@@ -286,15 +304,16 @@ func (o *OpenAI) Stream(ctx context.Context, req core.Request) (<-chan core.Stre
 		return nil, errors.New("provider: openai model id is required")
 	}
 	body, err := o.marshalRequest(oaRequest{
-		Model:         req.Model.ID,
-		Stream:        true,
-		StreamOptions: &oaStreamOpt{IncludeUsage: true},
-		Messages:      o.buildMessages(req),
-		Tools:         buildToolDefs(req.Tools),
-		Temperature:   req.Sampling.Temperature,
-		TopP:          req.Sampling.TopP,
-		MaxTokens:     req.Sampling.MaxTokens,
-		Seed:          req.Sampling.Seed,
+		Model:           req.Model.ID,
+		Stream:          true,
+		StreamOptions:   &oaStreamOpt{IncludeUsage: true},
+		Messages:        o.buildMessages(req),
+		Tools:           buildToolDefs(req.Tools),
+		Temperature:     req.Sampling.Temperature,
+		TopP:            req.Sampling.TopP,
+		MaxTokens:       req.Sampling.MaxTokens,
+		Seed:            req.Sampling.Seed,
+		ReasoningEffort: openAIReasoningEffort(req.ThinkingLevel),
 	})
 	if err != nil {
 		return nil, fmt.Errorf("provider: openai encode request: %w", err)
@@ -336,6 +355,24 @@ func (o *OpenAI) Stream(ctx context.Context, req core.Request) (<-chan core.Stre
 	out := make(chan core.StreamEvent, 32)
 	go o.readStream(ctx, resp, req.Model, out)
 	return out, nil
+}
+
+// openAIReasoningEffort maps the provider-neutral thinking level to the
+// chat-completions reasoning_effort field. An empty level omits the field
+// (server default); "off" is sent as "none" so an explicit disable is not
+// silently upgraded to the server's default effort. Unknown values are
+// omitted rather than sent as an invalid enum.
+func openAIReasoningEffort(level string) string {
+	switch strings.ToLower(strings.TrimSpace(level)) {
+	case "":
+		return ""
+	case "off", "none":
+		return "none"
+	case "minimal", "low", "medium", "high", "xhigh", "max":
+		return strings.ToLower(strings.TrimSpace(level))
+	default:
+		return ""
+	}
 }
 
 func (o *OpenAI) marshalRequest(req oaRequest) ([]byte, error) {

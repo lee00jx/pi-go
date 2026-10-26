@@ -137,6 +137,27 @@ gateway.WithEventMiddleware(func(ctx context.Context, in <-chan core.AgentEvent)
 })
 ```
 
+**使用 OpenAI Responses API。** `provider.NewOpenAI` 走
+`/chat/completions`，`provider.NewOpenAIResponses` 走 `/responses`。两个客户端都
+提供 `core.StreamFn`，只换构造器即可。Responses 客户端会回传 reasoning item（含
+加密推理内容），并流式处理文本、函数调用和推理摘要。
+
+```go
+resp, _ := provider.NewOpenAIResponses(os.Getenv("PI_BASE_URL"), os.Getenv("PI_API_KEY"))
+runner := &core.Runner{
+    Store:         store,
+    StreamFn:      provider.WithRetry(resp.Stream, nil),
+    Model:         core.Model{Provider: "openai", ID: "gpt-5-mini", ContextWindow: 400000},
+    ThinkingLevel: core.ThinkingHigh,
+    // ...tools、prompt、限额
+}
+```
+
+**设置思考强度。** `core.Runner.ThinkingLevel` 会复制到每一轮（包括第一轮）；
+`off` 显式关闭推理，留空则交给服务端默认。OpenAI chat 客户端下发
+`reasoning_effort`，Responses 客户端下发 `reasoning.effort`（默认带 summary 和
+加密推理内容）。`PrepareNextTurn` 可以在后续轮边界改这一级别。
+
 **其他选项。** `WithRateLimit`（每个用户的并发运行数和每分钟消息数）、`WithAuthorizer`
 （按会话追加权限检查）、`gw.InjectTurn`（不调模型直接写入欢迎语或总结）、
 `provider.WithExtraBody`（厂商特有的请求字段，比如关闭 Qwen 的思考）、
@@ -151,7 +172,7 @@ gateway.WithEventMiddleware(func(ctx context.Context, in <-chan core.AgentEvent)
 
 ```
 core/       对话循环、事件、工具接口、钩子、上下文压缩
-provider/   OpenAI 兼容与 Anthropic 客户端、重试、测试用假模型
+provider/   OpenAI chat + Responses 客户端、Anthropic 客户端、重试、测试用假模型
 session/    存储接口 + 内存实现
 tools/      工具注册表 + 内置 bash / 文件工具
 output/     可选的输出加工管线
@@ -170,3 +191,6 @@ go test -race ./...
 
 已知限制：运行锁和限流都只在单个进程内生效，暂不支持多实例部署；GORM 适配器目前只在
 SQLite 上验证过。
+
+计划中的 **0.3.0** 事件契约重构（对齐上游 pi 的 `message_update` / 块级事件）见
+[docs/REFACTOR_0.3.0.md](docs/REFACTOR_0.3.0.md)；0.2.x 是冻结的扁平事件兼容线。

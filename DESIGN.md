@@ -229,6 +229,30 @@ done 事件携带 usage(含 provider 原生 totalTokens)。
 - 上下文预算按**新模型**的 contextWindow 重算,若立即超阈值,下一轮优先触发压缩
 - 发 `model_changed` 事件,前端更新会话头部显示
 
+### 3.6 OpenAI Responses 客户端(2026-10-26 增补)
+
+与 chat completions 并列的**独立 client**:`provider.NewOpenAIResponses`
+(`POST {base}/responses`),同样实现 `core.StreamFn`。不复用 `OpenAI` 类型,
+因为 `input` items、扁平 function 工具、`response.*` SSE 事件与 chat 完全不同。
+
+- 请求:`store:false`(本库自己管历史)、`max_output_tokens`(下限 16)、
+  `reasoning:{effort,summary}` + `include:["reasoning.encrypted_content"]`
+- **reasoning item 回传**:thinking block 的 `Signature` 存完整 reasoning item
+  JSON(含加密内容),下一轮放进 `input`;只有 thinking 的消息整条跳过,避免
+  孤儿 reasoning item 被拒
+- **两个 ID**:function_call 的 `call_id` 用于工具结果配对(`Block.ToolCallID`),
+  `fc_...` 输出 item id 存 `Block.ItemID` 并在历史回放时带上
+- 流式归一:文本/推理摘要 → text_delta/thinking_delta;函数参数 → toolcall_delta;
+  `response.completed|incomplete` 的 output/usage 回填;`failed/error` 归为
+  StreamError(rate limit/server error 可重试)
+
+### 3.7 思考强度(2026-10-26 增补)
+
+core 定义 provider-neutral 常量 `off/minimal/low/medium/high/xhigh/max`;
+`Runner.ThinkingLevel` 拷贝到每一轮(含首轮),`PrepareNextTurn` 可覆盖,
+`off` 显式关闭。provider 负责映射:chat completions → `reasoning_effort`
+(off→none),Responses → `reasoning.effort` + summary。空值 = 交给服务端默认。
+
 ---
 
 ## 4. 工具层

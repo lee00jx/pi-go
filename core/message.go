@@ -36,15 +36,22 @@ const (
 //	thinking  → Thinking (plus Signature, Anthropic-only, see below)
 //	toolCall  → ToolCallID, Name, Arguments
 //
-// Signature carries the provider's opaque thinking signature (Anthropic)
-// so an extended-thinking conversation can round-trip to the same
-// provider. Other providers ignore it; converting a thinking block to a
-// different provider drops both Thinking and Signature (DESIGN §3.5).
+// Signature carries the provider's opaque continuation payload so a
+// thinking conversation can round-trip to the same provider: Anthropic's
+// thinking signature, or the full OpenAI Responses reasoning item JSON
+// (which carries the encrypted reasoning). Other providers ignore it;
+// converting a thinking block to a different provider drops both Thinking
+// and Signature (DESIGN §3.5).
 type Block struct {
-	Type       string          `json:"type"`
-	Text       string          `json:"text,omitempty"`
-	Thinking   string          `json:"thinking,omitempty"`
-	Signature  string          `json:"signature,omitempty"`
+	Type      string `json:"type"`
+	Text      string `json:"text,omitempty"`
+	Thinking  string `json:"thinking,omitempty"`
+	Signature string `json:"signature,omitempty"`
+	// ItemID is the provider's opaque output-item id for this block. OpenAI
+	// Responses pairs a function_call (fc_...) with its reasoning item;
+	// replaying that pairing avoids a 400 on the next request. Empty for
+	// providers that do not use item ids (e.g. chat completions).
+	ItemID     string          `json:"itemId,omitempty"`
 	ToolCallID string          `json:"toolCallId,omitempty"`
 	Name       string          `json:"name,omitempty"`
 	Arguments  json.RawMessage `json:"arguments,omitempty"`

@@ -500,3 +500,43 @@ func TestOpenAIInsecureTLSIsPerClient(t *testing.T) {
 		t.Fatal("default client unexpectedly accepted a self-signed certificate")
 	}
 }
+
+func TestOpenAIReasoningEffort(t *testing.T) {
+	cases := []struct {
+		name  string
+		level string
+		want  string
+	}{
+		{"high", core.ThinkingHigh, "high"},
+		{"off", core.ThinkingOff, "none"},
+		{"unset", "", ""},
+		{"bogus", "bogus", ""},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			var body []byte
+			srv := sseServer(t, []string{
+				`{"choices":[{"index":0,"delta":{"content":"ok"},"finish_reason":"stop"}]}`,
+				`[DONE]`,
+			}, &body)
+			defer srv.Close()
+
+			client := &OpenAI{BaseURL: srv.URL, APIKey: "k", HTTPClient: srv.Client()}
+			r := req(t)
+			r.ThinkingLevel = tc.level
+			ch, err := client.Stream(context.Background(), r)
+			if err != nil {
+				t.Fatal(err)
+			}
+			for range ch {
+			}
+			var got oaRequest
+			if err := json.Unmarshal(body, &got); err != nil {
+				t.Fatal(err)
+			}
+			if got.ReasoningEffort != tc.want {
+				t.Fatalf("reasoning_effort = %q, want %q (body %s)", got.ReasoningEffort, tc.want, body)
+			}
+		})
+	}
+}

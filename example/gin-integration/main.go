@@ -264,15 +264,27 @@ func main() {
 		if id == "" {
 			id = "gpt-4o-mini"
 		}
-		oa, err := provider.NewOpenAI(base, key)
-		if err != nil {
-			log.Fatal(err)
+		apiMode := strings.ToLower(strings.TrimSpace(os.Getenv("PI_OPENAI_API")))
+		if apiMode == "responses" {
+			oa, err := provider.NewOpenAIResponses(base, key)
+			if err != nil {
+				log.Fatal(err)
+			}
+			oa.Provider = providerName
+			streamFn = provider.WithRetry(oa.Stream, nil)
+			model = core.Model{Provider: providerName, ID: id, ContextWindow: 128000}
+			log.Printf("default provider: %s/%s @ %s (OpenAI Responses API)", providerName, id, base)
+		} else {
+			oa, err := provider.NewOpenAI(base, key)
+			if err != nil {
+				log.Fatal(err)
+			}
+			oa.Provider = providerName
+			// nil config = DESIGN §3.4 defaults (3 retries, 500ms base, 8s cap).
+			streamFn = provider.WithRetry(oa.Stream, nil)
+			model = core.Model{Provider: providerName, ID: id, ContextWindow: 128000}
+			log.Printf("default provider: %s/%s @ %s (OpenAI-compatible chat completions)", providerName, id, base)
 		}
-		oa.Provider = providerName
-		// nil config = DESIGN §3.4 defaults (3 retries, 500ms base, 8s cap).
-		streamFn = provider.WithRetry(oa.Stream, nil)
-		model = core.Model{Provider: providerName, ID: id, ContextWindow: 128000}
-		log.Printf("default provider: %s/%s @ %s (OpenAI-compatible)", providerName, id, base)
 	} else {
 		log.Println("default provider: PI_API_KEY not set — scripted faux provider (no tokens spent)")
 		faux := provider.NewFaux(
@@ -351,6 +363,10 @@ func main() {
 			"that seq to fetch it back.",
 		MaxTurns: 8,
 		Logger:   slog.Default(),
+		// Provider-neutral reasoning effort: off/minimal/low/medium/high/
+		// xhigh/max; empty leaves it to the provider. OpenAI maps it to
+		// reasoning_effort (chat) or reasoning.effort (Responses).
+		ThinkingLevel: os.Getenv("PI_THINKING"),
 
 		// Phase 5 (DESIGN §6.4): two-level context compaction. L1 (cheap,
 		// no LLM) evicts old tool results once EvictOlderThan user turns have
@@ -468,6 +484,13 @@ func main() {
       "request_id" returns 202 "duplicate" and does NOT re-run the loop.
     • rate limiting (PI_MAX_CONCURRENT / PI_MAX_PROMPTS_PER_MIN, 0 = off):
       over the per-user concurrent-run or prompts/min cap → HTTP 429.
+
+  OpenAI options:
+    • PI_OPENAI_API=responses switches the default OpenAI client from
+      /chat/completions to the /responses API (same tools, stream events and
+      thinking levels); unset/other = chat completions.
+    • PI_THINKING=off|minimal|low|medium|high|xhigh|max sets the reasoning
+      effort for every turn (empty = provider default).
 `
 	if _, ok := providers["anthropic"]; ok {
 		banner += `  6. switch this session's model mid-run (DESIGN §3.5; takes effect
